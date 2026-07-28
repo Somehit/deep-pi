@@ -1,0 +1,15 @@
+{
+  "snipThresholdPercent": 55,
+  "pruneThresholdPercent": 65,
+  "compactThresholdPercent": 75,
+  "snipKeepRecentTurns": 8,
+  "pruneKeepRecentTurns": 5,
+  "snipHeadChars": 1200,
+  "snipTailChars": 400,
+  "pruneHeadChars": 400,
+  "pruneTailChars": 160,
+  "compactionProvider": "deepseek",
+  "compactionModel": "deepseek-v4-flash",
+  "compactionThinkingLevel": "high",
+  "compactionMaxTokens": 12000
+}

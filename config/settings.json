@@ -1,0 +1,28 @@
+{
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-v4-pro",
+  "defaultThinkingLevel": "high",
+  "showCacheMissNotices": true,
+  "enabledModels": [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
+  ],
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 250000,
+    "keepRecentTokens": 60000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "provider": {
+      "timeoutMs": 3600000,
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  },
+  "images": {
+    "blockImages": true
+  }
+}
