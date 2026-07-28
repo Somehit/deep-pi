@@ -47,6 +47,9 @@ fi
 echo "Registering local Pi package: $ROOT_DIR"
 pi install "$ROOT_DIR"
 
+echo "Installing @alexanderfortin/pi-deepseek-usage..."
+pi install npm:@alexanderfortin/pi-deepseek-usage || echo "Warning: @alexanderfortin/pi-deepseek-usage install failed" >&2
+
 if (( APPLY_DEFAULTS )); then
   node "$ROOT_DIR/scripts/merge-settings.mjs" \
     "$SETTINGS_FILE" \

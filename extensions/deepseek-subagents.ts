@@ -16,7 +16,7 @@ import {
 import { Type } from "typebox";
 import { redactSensitiveLines } from "./sensitive-paths.ts";
 
-type AgentRole = "scout" | "reviewer";
+type AgentRole = "scout" | "reviewer" | "adversarial" | "reviewer-flash" | "adversarial-flash";
 
 interface AgentDefinition {
   model: string;
@@ -40,20 +40,22 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sensitivePathsExtension = resolve(packageRoot, "extensions/sensitive-paths.ts");
 
 function loadAgent(role: AgentRole): AgentDefinition {
+  const isFlashAgent = role === "scout" || role.endsWith("-flash");
   const instructions = readFileSync(resolve(packageRoot, `instructions/agents/${role}.md`), "utf8").trim();
-  return role === "scout"
-    ? {
-        model: "deepseek-v4-flash",
-        thinking: "high",
-        tools: ["read", "grep", "find", "ls"],
-        instructions,
-      }
-    : {
-        model: "deepseek-v4-pro",
-        thinking: "max",
-        tools: ["read", "grep", "find", "ls"],
-        instructions,
-      };
+  if (isFlashAgent) {
+    return {
+      model: "deepseek-v4-flash",
+      thinking: "high",
+      tools: ["read", "grep", "find", "ls"],
+      instructions,
+    };
+  }
+  return {
+    model: "deepseek-v4-pro",
+    thinking: "max",
+    tools: ["read", "grep", "find", "ls"],
+    instructions,
+  };
 }
 
 function emptyUsage(): Usage {
@@ -141,8 +143,8 @@ async function runAgent(
   await writeFile(promptPath, agent.instructions, { encoding: "utf8", mode: 0o600 });
 
   let effectiveTask = task;
-  if (role === "reviewer") {
-    onProgress?.("Collecting Git diff for reviewer...");
+  if (role.startsWith("reviewer") || role.startsWith("adversarial")) {
+    onProgress?.(`Collecting Git diff for ${role}...`);
     effectiveTask += `\n\n<current-git-context>\n${await gitReviewContext(pi, cwd)}\n</current-git-context>`;
   }
 
@@ -250,9 +252,9 @@ export default function deepseekSubagentsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "deepseek_delegate",
     label: "DeepSeek Delegate",
-    description: "Delegate isolated read-only investigation to Scout (Flash/max) or code review to Reviewer (Pro/max).",
+    description: "Delegate isolated read-only investigation to Scout (Flash), code review to Reviewer (Pro or Flash), or adversarial testing to Adversarial (Pro or Flash). Use reviewer-flash/adversarial-flash for faster, cheaper checks.",
     parameters: Type.Object({
-      role: StringEnum(["scout", "reviewer"] as const),
+      role: StringEnum(["scout", "reviewer", "adversarial", "reviewer-flash", "adversarial-flash"] as const),
       task: Type.String({ description: "Specific, bounded task for the subagent" }),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -275,11 +277,19 @@ export default function deepseekSubagentsExtension(pi: ExtensionAPI): void {
     },
   });
 
+  function commandLabel(role: AgentRole): string {
+    if (role === "scout") return "scout";
+    if (role === "reviewer") return "review";
+    if (role === "reviewer-flash") return "review-flash";
+    if (role === "adversarial-flash") return "adversarial-flash";
+    return role;
+  }
+
   async function runFromCommand(role: AgentRole, args: string, ctx: ExtensionContext): Promise<void> {
     let task = args.trim();
     if (!task && ctx.hasUI) task = (await ctx.ui.input(`${role} task:`, "What should the subagent investigate?"))?.trim() ?? "";
     if (!task) {
-      ctx.ui.notify(`Usage: /${role === "reviewer" ? "review" : "scout"} <task>`, "warning");
+      ctx.ui.notify(`Usage: /${commandLabel(role)} <task>`, "warning");
       return;
     }
 
@@ -304,12 +314,22 @@ export default function deepseekSubagentsExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("scout", {
-    description: "Run an isolated read-only Scout with DeepSeek Flash/max",
+    description: "Run an isolated read-only Scout with DeepSeek Flash",
     handler: async (args, ctx) => runFromCommand("scout", args, ctx),
   });
 
   pi.registerCommand("review", {
-    description: "Review the current Git diff with an isolated DeepSeek Pro/max agent",
+    description: "Review the current Git diff with an isolated DeepSeek Pro agent",
     handler: async (args, ctx) => runFromCommand("reviewer", args, ctx),
+  });
+
+  pi.registerCommand("review-flash", {
+    description: "Review the current Git diff with an isolated DeepSeek Flash agent (faster, cheaper)",
+    handler: async (args, ctx) => runFromCommand("reviewer-flash", args, ctx),
+  });
+
+  pi.registerCommand("adversarial-flash", {
+    description: "Adversarial review with DeepSeek Flash (faster, cheaper)",
+    handler: async (args, ctx) => runFromCommand("adversarial-flash", args, ctx),
   });
 }

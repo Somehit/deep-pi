@@ -13,7 +13,7 @@
     "brainstorm": {
       "label": "brainstorm",
       "provider": "deepseek",
-      "model": "deepseek-v4-flash",
+      "model": "deepseek-v4-pro",
       "thinkingLevel": "max",
       "tools": [
         "read",
@@ -21,7 +21,8 @@
         "find",
         "ls",
         "ocr_image",
-        "deepseek_delegate"
+        "deepseek_delegate",
+        "web_search"
       ],
       "instructionsFile": "../instructions/brainstorm.md"
     },
@@ -37,7 +38,8 @@
         "ls",
         "ocr_image",
         "deepseek_delegate",
-        "plan_interview"
+        "plan_interview",
+        "web_search"
       ],
       "instructionsFile": "../instructions/plan.md"
     },
@@ -55,9 +57,29 @@
         "edit",
         "write",
         "ocr_image",
-        "deepseek_delegate"
+        "deepseek_delegate",
+        "web_search"
       ],
       "instructionsFile": "../instructions/build.md"
+    },
+    "ferrari": {
+      "label": "ferrari",
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "thinkingLevel": "high",
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "edit",
+        "write",
+        "ocr_image",
+        "deepseek_delegate",
+        "web_search"
+      ],
+      "instructionsFile": "../instructions/ferrari.md"
     }
   }
 }

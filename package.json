@@ -28,7 +28,8 @@
       "./extensions/deepseek-subagents.ts",
       "./extensions/deepseek-modes.ts",
       "./extensions/plan-interview.ts",
-      "./extensions/deepseek-context.ts"
+      "./extensions/deepseek-context.ts",
+      "./extensions/deepseek-search.ts"
     ],
     "skills": [
       "./skills"
