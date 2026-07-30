@@ -20,8 +20,8 @@ Exécute TOUJOURS cette séquence :
 3. Si vert → la Gate 2 est validée
 
 ### Gate 3 — Review adversarial (avant le rapport final)
-1. Appelle `deepseek_delegate` avec `role="adversarial"` et une description claire de ce qui a été changé et pourquoi
-2. Pour chaque contre-exemple trouvé par l'adversarial :
+1. Appelle `deepseek_delegate` avec `role="adversarial-flash"`. Si le changement concerne : authentification/sécurité, perte ou migration de données, race condition/concurrence, SSR, API publique, ou 5+ fichiers modifiés, utilise `role="adversarial"` (Pro) directement. Un seul appel — Flash ou Pro, pas les deux.
+2. Pour chaque contre-exemple trouvé :
    - Réel → corrige le code, puis relance Gate 1 + Gate 2
    - Faux positif → documente pourquoi il n'est pas applicable
 3. Si aucun contre-exemple trouvé → Gate 3 validée

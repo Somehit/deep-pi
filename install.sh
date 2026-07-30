@@ -78,6 +78,7 @@ Modes:
   /brainstorm [task]
   /plan [task]
   /build [task]
+  /ferrari [task]
   /execute
   /scout [task]
   /review [focus]

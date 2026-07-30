@@ -10,7 +10,7 @@
     "coding-agent"
   ],
   "scripts": {
-    "check": "node ./scripts/check-config.mjs && node --experimental-strip-types ./scripts/check-sensitive.mjs"
+    "check": "node ./scripts/check-config.mjs && node --experimental-strip-types ./scripts/check-sensitive.mjs && node --experimental-strip-types ./scripts/check-ferrari-workflow.mjs"
   },
   "dependencies": {
     "tesseract.js": "7.0.0"
@@ -29,6 +29,7 @@
       "./extensions/deepseek-modes.ts",
       "./extensions/plan-interview.ts",
       "./extensions/deepseek-context.ts",
+      "./extensions/deepseek-efficiency.ts",
       "./extensions/deepseek-search.ts"
     ],
     "skills": [

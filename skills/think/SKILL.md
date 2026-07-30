@@ -23,14 +23,12 @@ Ne réponds JAMAIS sans avoir complété au moins la phase d'exploration.
 
 ## Phase 2 — Exploration large (obligatoire)
 
-Génère **3 à 5 requêtes** `web_search` sous des angles différents. Exemples d'angles :
-- Définition / documentation officielle
-- Version récente / changelog / release notes
-- Avis d'experts / comparatifs / benchmarks
+Génère **1 à 3 requêtes** `web_search` sous des angles différents. Privilégie les sources officielles (docs, changelogs, release notes) avant les sources secondaires. Exemples d'angles :
+- Documentation officielle / changelog / release notes
 - Limitations, bugs connus, controverses
-- Alternatives et contexte historique
+- Alternatives et contexte historique (si pertinent)
 
-**Règle :** ne te contente JAMAIS d'une seule recherche. La diversité des angles est essentielle.
+**Règle :** ne te contente JAMAIS d'une seule recherche si plusieurs angles sont pertinents. Mais ne lance pas plus de 3 recherches — la concision prime.
 
 ## Phase 3 — Analyse des résultats
 
@@ -42,8 +40,8 @@ Après avoir reçu les résultats :
 
 ## Phase 4 — Recherche ciblée (si nécessaire)
 
-Si des lacunes ou contradictions persistent, lance 1 à 3 recherches supplémentaires pour les combler.
-Itère jusqu'à ce que les points clés soient couverts (maximum 3 rounds de recherche).
+Si des lacunes ou contradictions persistent, lance 1 à 2 recherches supplémentaires pour les combler.
+Un seul round complémentaire maximum — ensuite, synthétise avec les informations disponibles.
 
 ## Phase 5 — Synthèse
 

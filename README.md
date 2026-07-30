@@ -1,6 +1,6 @@
 # Harness Pi natif DeepSeek
 
-Configuration Pi locale et portable avec trois modes : **brainstorm**, **plan** et **build**.
+Configuration Pi locale et portable avec quatre modes : **brainstorm**, **plan**, **build** et **ferrari**.
 
 ## Installation
 
@@ -33,9 +33,10 @@ Si nécessaire, lance ensuite Pi et exécute :
 
 | Mode | Modèle par défaut | Thinking | Outils | Usage |
 |---|---|---:|---|---|
-| brainstorm | `deepseek-v4-flash` | max | lecture/recherche + OCR | Explorer des options et compromis |
-| plan | `deepseek-v4-pro` | max | lecture/recherche + interview | Clarifier les zones de flou puis produire un plan fondé sur le code |
+| brainstorm | `deepseek-v4-pro` | high | lecture/recherche + OCR | Explorer des options et compromis |
+| plan | `deepseek-v4-pro` | high | lecture/recherche + interview | Clarifier les zones de flou puis produire un plan fondé sur le code |
 | build | `deepseek-v4-pro` | high | lecture, shell, édition | Implémenter et vérifier |
+| ferrari | `deepseek-v4-flash` | high | lecture, shell, édition | Explorer et planifier, puis exécuter après approbation |
 
 Commandes :
 
@@ -46,8 +47,12 @@ Commandes :
 /plan préparer la migration de l'API
 /build
 /build appliquer le plan validé
+/ferrari
+/ferrari corriger rapidement la régression
 /execute            # confirmer et exécuter le dernier plan capturé
 /execute --yes      # sans confirmation interactive
+/execute-ferrari    # exécuter le dernier plan Ferrari
+/execute-ferrari --yes  # sans confirmation interactive
 /scout <recherche>
 /review [focus]
 /mode               # sélecteur
@@ -74,6 +79,25 @@ L'interface regroupe jusqu'à quatre questions dans des onglets et propose :
 - navigation clavier avec les raccourcis de sélection Pi, `Tab`/flèches entre questions et chiffres pour choisir directement.
 
 Les réponses reviennent comme résultat d'outil et restent donc dans l'historique de session. L'outil est autorisé uniquement en mode plan ; les garde-fous lecture seule restent inchangés. En RPC, il utilise les dialogues Pi standards. En mode print/JSON sans interface, l'agent reçoit l'instruction de poser les mêmes questions en texte.
+
+## Workflow Ferrari
+
+Ferrari fonctionne en deux phases distinctes :
+
+### Phase planning (⏸)
+- Lecture seule : `bash`, `edit` et `write` sont **bloqués**.
+- L'agent explore le code avec `scout` et produit un plan en 3-7 étapes.
+- Il s'arrête automatiquement après le plan.
+
+### Modal d'approbation
+Une fois le plan produit, une modal propose :
+- **▶ Exécuter le plan** — débloque `bash`, `edit`, `write` et lance BUILD + VERIFY.
+- **✏ Réviser** — ouvre l'éditeur pour donner un feedback ; l'agent produit un nouveau plan.
+- **✖ Annuler** — abandonne le plan sans modifier le workspace.
+
+L'approbation est **révoquée automatiquement** après l'exécution, au changement de mode, à `/tree` et au rechargement.
+
+En mode non interactif, le plan est capturé mais pas exécuté. Utiliser `/execute-ferrari --yes`.
 
 ## Handoff plan → build
 
@@ -107,7 +131,7 @@ Le package fournit le skill :
 /skill:ocr ./document.png fra+eng
 ```
 
-Le skill appelle l'outil structuré `ocr_image`, disponible dans les trois modes. Contrairement à l'ancien skill Reasonix :
+Le skill appelle l'outil structuré `ocr_image`, disponible dans les quatre modes. Contrairement à l'ancien skill Reasonix :
 
 - aucune commande `node -e` n'est construite avec un chemin injecté ;
 - `tesseract.js` est installé dans ce package, pas dans le workspace analysé ;
@@ -134,7 +158,7 @@ npm run check
 ## Choix cache-first
 
 - Le catalogue natif de Pi est utilisé : aucun `models.json` ne remplace les métadonnées DeepSeek.
-- Plan et build utilisent Pro ; brainstorm utilise volontairement Flash avec thinking `max`.
+- Brainstorm, plan et build utilisent Pro avec thinking `high` ; ferrari utilise Flash avec thinking `high`.
 - Le schéma envoyé au modèle reste stable : l'union des outils, dont `ocr_image`, `deepseek_delegate` et `plan_interview`, est chargée une fois, puis l'extension bloque à l'exécution ceux que le mode n'autorise pas.
 - Les instructions de mode sont ajoutées en fin de contexte au lieu de reconstruire le prompt système.
 - À 55 %, les anciens résultats d'outils réussis sont raccourcis en gardant leur début et leur fin ; les 8 derniers tours restent intacts.
@@ -143,7 +167,7 @@ npm run check
 - Les notices de cache miss sont activées.
 - Brainstorm et plan bloquent effectivement `bash`, `edit` et `write`, même si leurs schémas restent visibles pour préserver le cache.
 
-Un changement plan ↔ build conserve le même modèle et reste favorable au cache. Passer vers ou depuis brainstorm change de modèle et utilise donc un cache distinct. Il reste préférable de ne pas cycler inutilement.
+Les changements entre brainstorm, plan et build conservent le même modèle et restent favorables au cache. Passer vers ou depuis ferrari change de modèle et utilise donc un cache distinct. Il reste préférable de ne pas cycler inutilement.
 
 ## Protection `.env` et SSH
 

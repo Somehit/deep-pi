@@ -20,19 +20,16 @@ Tu n'es pas là pour répondre — tu es là pour ouvrir le territoire.
 **Ne jamais conclure. Ne jamais synthétiser en une seule réponse.**
 Garde l'exploration ouverte. "Yes, and..." plutôt que "Yes, but..."
 
-## Phase 1 — Grille-moi : recherche agressive
+## Phase 1 — Grille-moi : recherche ciblée
 
-Lance **5 à 7** `web_search` sous des angles délibérément opposés ou orthogonaux :
+Lance **2 à 4** `web_search` sous des angles délibérément opposés ou orthogonaux. Choisis les angles les plus pertinents pour le sujet :
 
 1. **Orthodoxe** — le consensus, la documentation officielle, la vue mainstream
 2. **Hétérodoxe** — critiques, controverses, échecs retentissants, limites connues
-3. **Adjacent** — domaines voisins, inspirations cross-disciplinaires, analogies
-4. **Extrême** — cas limites, pires scénarios, records, abuse cases
-5. **Futur** — tendances émergentes, roadmaps, prédictions, signaux faibles
-6. **Inverse** — et si on faisait l'exact opposé ? qui défend la position inverse ?
-7. **Silencieux** — ce dont on ne parle pas, angles morts, "elephant in the room"
+3. **Extrême** — cas limites, pires scénarios, abuse cases
+4. **Silencieux** — ce dont on ne parle pas, angles morts, "elephant in the room"
 
-Pour chaque angle, trouve au moins une source. Cite-la.
+Pour chaque angle, trouve au moins une source. Cite-la. Si le sujet est très spécifique, 2 angles suffisent.
 
 ## Phase 2 — Carte des tensions
 
@@ -46,9 +43,9 @@ Pour chaque angle, trouve au moins une source. Cite-la.
 
 Présente cette carte sans la résoudre. Une carte n'a pas de conclusion.
 
-## Phase 3 — Génération de questions (10+)
+## Phase 3 — Génération de questions (5-8)
 
-Génère au moins 10 questions, en piochant dans ces catégories :
+Génère 5 à 8 questions, en piochant dans ces catégories :
 
 - **What-if** : "Et si on inversait X ?" "Et si Y n'existait pas ?"
 - **Provocatrices** : "Pourquoi tout le monde fait X alors que c'est une mauvaise idée ?"

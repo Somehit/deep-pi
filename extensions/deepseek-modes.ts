@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createWorker, OEM } from "tesseract.js";
 import { Type } from "typebox";
+import { detectFerrariPlan, ferrariBuildInstructions, isMutationTool } from "./ferrari-workflow.ts";
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -89,6 +90,12 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
   let activeModeName = config.defaultMode;
   let modeNeedsAnnouncement = true;
   let latestPlanText: string | undefined;
+  // Ferrari workflow
+  let ferrariPhase: "planning" | "executing" = "planning";
+  let ferrariPlanText: string | undefined;
+  let ferrariPlanPending = false;
+  let ferrariBuildPending = false;
+  let ferrariComplete = false;
 
   function activeMode(): LoadedMode {
     return config.modes[activeModeName] ?? config.modes[config.defaultMode];
@@ -181,10 +188,42 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
 
   function updateStatus(ctx: ExtensionContext): void {
     const mode = activeMode();
+    let label = `mode:${mode.label ?? activeModeName}`;
+    if (activeModeName === "ferrari") {
+      label = ferrariPhase === "executing"
+        ? ctx.ui.theme.fg("warning", `mode:ferrari ⚡`)
+        : ctx.ui.theme.fg("accent", `mode:ferrari ⏸`);
+      ctx.ui.setStatus("deepseek-harness-mode", label);
+      return;
+    }
     ctx.ui.setStatus(
       "deepseek-harness-mode",
-      ctx.ui.theme.fg("accent", `mode:${mode.label ?? activeModeName}`),
+      ctx.ui.theme.fg("accent", label),
     );
+  }
+
+  function resetFerrariState(ctx?: ExtensionContext): void {
+    ferrariPhase = "planning";
+    ferrariPlanText = undefined;
+    ferrariPlanPending = false;
+    ferrariBuildPending = false;
+    ferrariComplete = false;
+    if (ctx) updateStatus(ctx);
+  }
+
+  function latestFerrariPlan(ctx: ExtensionContext): string | undefined {
+    const entries = ctx.sessionManager.getBranch();
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index] as {
+        type?: string;
+        customType?: string;
+        data?: { text?: string };
+      };
+      if (entry.type === "custom" && entry.customType === "ferrari-workflow-plan") {
+        return entry.data?.text;
+      }
+    }
+    return undefined;
   }
 
   function latestPersistedMode(ctx: ExtensionContext): string | undefined {
@@ -288,6 +327,11 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
     // Keep one stable schema across modes for DeepSeek prefix-cache reuse.
     // Runtime gates below enforce each mode's narrower allowlist.
     pi.setActiveTools(stableToolSurface);
+
+    // Reset Ferrari state when leaving Ferrari mode
+    if (name !== "ferrari") {
+      resetFerrariState();
+    }
 
     if (options.persist !== false) {
       pi.appendEntry("deepseek-harness-mode", { name });
@@ -410,6 +454,53 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("execute-ferrari", {
+    description: "Confirm and execute the latest Ferrari plan in build mode",
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Wait for the current turn to finish before executing a plan", "warning");
+        return;
+      }
+
+      ferrariPlanText = ferrariPlanText ?? latestFerrariPlan(ctx);
+      if (!ferrariPlanText) {
+        ctx.ui.notify(
+          "No Ferrari plan found in the active session branch. Run Ferrari first.",
+          "warning",
+        );
+        return;
+      }
+
+      const skipConfirmation = /^(?:--yes|-y|yes)$/i.test(args.trim());
+      if (!skipConfirmation) {
+        if (!ctx.hasUI) {
+          ctx.ui.notify("Use /execute-ferrari --yes in non-interactive mode", "warning");
+          return;
+        }
+        const preview = ferrariPlanText.length > 1200
+          ? `${ferrariPlanText.slice(0, 1200)}\n…`
+          : ferrariPlanText;
+        const confirmed = await ctx.ui.confirm(
+          "Execute latest Ferrari plan?",
+          `${preview}\n\nSwitch to Ferrari build phase and continue?`,
+        );
+        if (!confirmed) return;
+      }
+
+      const modelReady = await activateMode("ferrari", ctx);
+      if (!modelReady) return;
+      const planSnapshot = ferrariPlanText.slice(0, 80_000);
+      ferrariPhase = "executing";
+      ferrariBuildPending = true;
+      ferrariPlanPending = false;
+      ferrariComplete = false;
+      updateStatus(ctx);
+      pi.sendUserMessage(
+        `Exécute le plan Ferrari approuvé.\n\n<approved-plan>\n${planSnapshot}\n</approved-plan>`,
+      );
+    },
+  });
+
   for (const shortcut of config.cycleShortcuts ?? []) {
     pi.registerShortcut(shortcut, {
       description: "Cycle DeepSeek harness mode",
@@ -418,6 +509,23 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
   }
 
   pi.on("tool_call", (event) => {
+    // Block mutation tools in Ferrari planning mode
+    if (activeModeName === "ferrari" && ferrariPhase === "planning" && isMutationTool(event.toolName)) {
+      return {
+        block: true,
+        reason: `Ferrari planning: "${event.toolName}" is disabled. Approve the plan first before making changes.`,
+      };
+    }
+
+    // Blocking mutation tools in read-only modes — suggest alternatives instead of "switch mode"
+    const READ_ONLY_MODES = new Set(["brainstorm", "plan"]);
+    if (READ_ONLY_MODES.has(activeModeName) && isMutationTool(event.toolName)) {
+      return {
+        block: true,
+        reason: `Mode ${activeModeName}: ${event.toolName} is disabled (this mode is read-only). Use ls, find, grep, or read for code inspection.`,
+      };
+    }
+
     const mode = activeMode();
     if (mode.tools.includes(event.toolName)) return;
     const enablingModes = Object.entries(config.modes)
@@ -433,6 +541,23 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", () => {
+    // Ferrari approved-build injection
+    if (ferrariBuildPending && activeModeName === "ferrari") {
+      ferrariBuildPending = false;
+      return {
+        message: {
+          customType: "ferrari-execute-context",
+          content: ferrariBuildInstructions(ferrariPlanText ?? ""),
+          display: false,
+        },
+      };
+    }
+
+    // Defensive: clear ferrariBuildPending if we're not in ferrari mode
+    if (ferrariBuildPending && activeModeName !== "ferrari") {
+      ferrariBuildPending = false;
+    }
+
     if (!modeNeedsAnnouncement) return;
     modeNeedsAnnouncement = false;
     const mode = activeMode();
@@ -446,25 +571,125 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("turn_end", (event) => {
-    if (activeModeName !== "plan" || assistantHasToolCall(event.message)) return;
-    const text = assistantText(event.message);
-    if (!text || !looksLikePlan(text)) return;
-    latestPlanText = text.slice(0, 80_000);
-    pi.appendEntry("deepseek-harness-plan", { text: latestPlanText, capturedAt: Date.now() });
+    if (activeModeName === "plan" && !assistantHasToolCall(event.message)) {
+      const text = assistantText(event.message);
+      if (text && looksLikePlan(text)) {
+        latestPlanText = text.slice(0, 80_000);
+        pi.appendEntry("deepseek-harness-plan", { text: latestPlanText, capturedAt: Date.now() });
+      }
+    }
+
+    // Ferrari plan detection: capture plans even alongside tool calls —
+    // detectFerrariPlan is strict enough (PHASE 2 marker + 3-7 steps + no PHASE 3 + stop marker)
+    if (activeModeName === "ferrari" && ferrariPhase === "planning" && !ferrariPlanPending) {
+      const text = assistantText(event.message);
+      if (!text) return;
+      const plan = detectFerrariPlan(text);
+      if (plan) {
+        ferrariPlanText = plan.rawText.slice(0, 80_000);
+        ferrariPlanPending = true;
+        pi.appendEntry("ferrari-workflow-plan", { text: ferrariPlanText, capturedAt: Date.now() });
+      }
+    }
+
+    // Ferrari execution: detect completion marker (accent-insensitive)
+    if (activeModeName === "ferrari" && ferrariPhase === "executing" && !ferrariComplete) {
+      const text = assistantText(event.message);
+      if (text) {
+        const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        if (/FERRARI\s*COMPLETE/i.test(normalized)) {
+          ferrariComplete = true;
+        }
+      }
+    }
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    // Revoke Ferrari execution approval after build completes (detected via FERRARI COMPLETE marker)
+    if (activeModeName === "ferrari" && ferrariPhase === "executing" && ferrariComplete) {
+      resetFerrariState(ctx);
+      return;
+    }
+
+    // Show Ferrari plan approval modal
+    if (activeModeName !== "ferrari" || !ferrariPlanPending || !ferrariPlanText) return;
+
+    // Snapshot before async to avoid TOCTOU from session_compact / session_tree
+    const planSnapshot = ferrariPlanText;
+
+    if (!ctx.hasUI) {
+      // Non-interactive: keep plan captured, reset pending so next plan can be detected
+      ferrariPlanPending = false;
+      ctx.ui.notify(
+        "Ferrari plan captured but no UI available. Use /execute-ferrari --yes to run it.",
+        "warning",
+      );
+      return;
+    }
+
+    const preview = planSnapshot.length > 1200
+      ? `${planSnapshot.slice(0, 1200)}\n…`
+      : planSnapshot;
+
+    const choice = await ctx.ui.select("Ferrari — valider le plan", [
+      "▶ Exécuter le plan",
+      "✏ Réviser (donner un feedback)",
+      "✖ Annuler",
+    ]);
+
+    // Re-check after await: state could have been reset by compaction/tree/switch
+    if (!ferrariPlanPending || ferrariPlanText !== planSnapshot) {
+      return;
+    }
+
+    if (!choice || choice.startsWith("✖")) {
+      ferrariPlanPending = false;
+      ferrariPlanText = undefined;
+      updateStatus(ctx);
+      return;
+    }
+
+    if (choice.startsWith("✏")) {
+      ferrariPlanPending = false;
+      ferrariPlanText = undefined;
+      const feedback = await ctx.ui.editor("Feedback pour réviser le plan :", "");
+      updateStatus(ctx);
+      if (feedback?.trim()) {
+        pi.sendUserMessage(
+          `Révise le plan précédent avec ce feedback :\n\n${feedback.trim()}`,
+        );
+      }
+      return;
+    }
+
+    // Execute: approve and trigger build
+    ferrariPlanPending = false;
+    ferrariPhase = "executing";
+    ferrariBuildPending = true;
+    ferrariComplete = false;
+    updateStatus(ctx);
+
+    pi.sendUserMessage(
+      `Exécute le plan Ferrari approuvé.\n\n<approved-plan>\n${planSnapshot.slice(0, 80_000)}\n</approved-plan>`,
+    );
   });
 
   pi.on("session_compact", () => {
     modeNeedsAnnouncement = true;
+    resetFerrariState();
   });
 
   pi.on("session_tree", () => {
     modeNeedsAnnouncement = true;
+    resetFerrariState();
   });
 
   pi.on("session_start", async (_event, ctx) => {
     const restored = latestPersistedMode(ctx);
     const initialMode = restored && config.modes[restored] ? restored : config.defaultMode;
     latestPlanText = latestPersistedPlan(ctx);
+    // Restore Ferrari plan from session (but always start in planning phase)
+    ferrariPlanText = latestFerrariPlan(ctx);
     await activateMode(initialMode, ctx, { persist: false, notify: false });
   });
 }
