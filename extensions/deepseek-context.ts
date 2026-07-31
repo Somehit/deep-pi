@@ -9,6 +9,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { hasMaxSinceLastCompaction } from "./max-workflow.ts";
 import { redactSensitiveLines } from "./sensitive-paths.ts";
 
 interface ContextConfig {
@@ -25,6 +26,10 @@ interface ContextConfig {
   compactionModel: string;
   compactionThinkingLevel: "off" | "high" | "max";
   compactionMaxTokens: number;
+  maxCompactionProvider: string;
+  maxCompactionModel: string;
+  maxCompactionThinkingLevel: "off" | "high" | "max";
+  maxCompactionMaxTokens: number;
 }
 
 interface MaintenanceState {
@@ -163,15 +168,20 @@ export default function deepseekContextExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
-    const model = ctx.modelRegistry.find(config.compactionProvider, config.compactionModel);
+    const max = hasMaxSinceLastCompaction(ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>);
+    const provider = max ? config.maxCompactionProvider : config.compactionProvider;
+    const modelId = max ? config.maxCompactionModel : config.compactionModel;
+    const thinking = max ? config.maxCompactionThinkingLevel : config.compactionThinkingLevel;
+    const maxTokens = max ? config.maxCompactionMaxTokens : config.compactionMaxTokens;
+    const model = ctx.modelRegistry.find(provider, modelId);
     if (!model) {
-      ctx.ui.notify("DeepSeek Flash compactor unavailable; falling back to Pi compaction", "warning");
+      ctx.ui.notify(`DeepSeek compactor ${provider}/${modelId} unavailable; falling back to Pi compaction`, "warning");
       return;
     }
 
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok || !auth.apiKey) {
-      ctx.ui.notify("DeepSeek Flash compactor authentication unavailable; falling back to Pi compaction", "warning");
+      ctx.ui.notify(`DeepSeek compactor ${modelId} authentication unavailable; falling back to Pi compaction`, "warning");
       return;
     }
 
@@ -204,7 +214,7 @@ Preserve exact file paths, symbols, commands, errors, user-approved plans, and t
 
     try {
       ctx.ui.notify(
-        `Compacting ${preparation.tokensBefore.toLocaleString()} tokens with ${config.compactionModel}...`,
+        `Compacting ${preparation.tokensBefore.toLocaleString()} tokens with ${modelId}/${thinking}...`,
         "info",
       );
       const response = await completeSimple(
@@ -223,8 +233,8 @@ Preserve exact file paths, symbols, commands, errors, user-approved plans, and t
           apiKey: auth.apiKey,
           headers: auth.headers,
           env: auth.env,
-          maxTokens: config.compactionMaxTokens,
-          reasoning: config.compactionThinkingLevel,
+          maxTokens,
+          reasoning: thinking,
           signal,
           cacheRetention: "none",
           sessionId: uuidv7(),
@@ -250,7 +260,7 @@ Preserve exact file paths, symbols, commands, errors, user-approved plans, and t
     } catch (error) {
       if (!signal.aborted) {
         ctx.ui.notify(
-          `DeepSeek Flash compaction failed; using Pi fallback: ${error instanceof Error ? error.message : String(error)}`,
+          `DeepSeek compaction failed; using Pi fallback: ${error instanceof Error ? error.message : String(error)}`,
           "warning",
         );
       }

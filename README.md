@@ -1,6 +1,6 @@
 # Harness Pi natif DeepSeek
 
-Configuration Pi locale et portable avec quatre modes : **brainstorm**, **plan**, **build** et **ferrari**.
+Configuration Pi locale, cache-conscious et portable avec deux modes persistants — **Instant** et **Think** — plus le workflow transversal **`/max`**.
 
 ## Installation
 
@@ -9,121 +9,92 @@ chmod +x install.sh uninstall.sh
 ./install.sh
 ```
 
-L'installateur :
-
-1. vérifie la configuration ;
-2. sauvegarde `~/.pi/agent/settings.json` ;
-3. enregistre ce dossier comme package Pi local global ;
-4. fusionne `config/settings.json` dans les settings globaux ;
-5. ne copie et ne stocke aucune clé API.
-
-Pour conserver tes defaults Pi actuels :
-
-```bash
-./install.sh --no-defaults
-```
-
-Si nécessaire, lance ensuite Pi et exécute :
+L’installateur vérifie Node, npm, Git et la configuration, sauvegarde les settings Pi, installe ce dossier comme package local et fusionne `config/settings.json`. Il ne copie aucune clé API.
 
 ```text
 /login deepseek
 ```
 
-## Modes
+Utiliser `./install.sh --no-defaults` pour ne pas modifier les defaults globaux. Après une modification du package, utiliser `/reload` ; relancer l’installation seulement pour réappliquer les settings.
 
-| Mode | Modèle par défaut | Thinking | Outils | Usage |
-|---|---|---:|---|---|
-| brainstorm | `deepseek-v4-pro` | high | lecture/recherche + OCR | Explorer des options et compromis |
-| plan | `deepseek-v4-pro` | high | lecture/recherche + interview | Clarifier les zones de flou puis produire un plan fondé sur le code |
-| build | `deepseek-v4-pro` | high | lecture, shell, édition | Implémenter et vérifier |
-| ferrari | `deepseek-v4-flash` | high | lecture, shell, édition | Explorer et planifier, puis exécuter après approbation |
+## Les deux modes
 
-Commandes :
+| Mode | Modèle | Thinking | Comportement |
+|---|---|---:|---|
+| Instant (défaut) | `deepseek-v4-flash` | high | Questions simples et changements explicitement demandés, sans plan cérémoniel |
+| Think | `deepseek-v4-pro` | high | Recherche, réflexion et plans structurés ; workspace read-only hors `/execute` |
+
+Changer de mode avec `Ctrl+Alt+M`, `F6`, `/think`, `/instant`, ou `/mode`. Les commandes de mode acceptent une tâche optionnelle (`/think analyser…`). `/status` et `/mode status` affichent le mode et le dernier plan ; `/diff` affiche le status/diff Git après redaction des chemins sensibles.
+
+Le schéma d’outils reste stable pour favoriser le prefix cache DeepSeek. Une gate runtime bloque néanmoins chaque outil non autorisé.
+
+## Plans Think et `/execute`
+
+Think publie un plan avec l’outil structuré `publish_plan`. Chaque plan possède un ID et un effort `normal` ou `max`.
 
 ```text
-/brainstorm
-/brainstorm concevoir le système de cache
-/plan
-/plan préparer la migration de l'API
-/build
-/build appliquer le plan validé
-/ferrari
-/ferrari corriger rapidement la régression
-/execute            # confirmer et exécuter le dernier plan capturé
-/execute --yes      # sans confirmation interactive
-/execute-ferrari    # exécuter le dernier plan Ferrari
-/execute-ferrari --yes  # sans confirmation interactive
-/scout <recherche>
-/review [focus]
-/mode               # sélecteur
-/mode status
-/mode plan
+/execute             # dernier plan prêt
+/execute P3          # plan explicite
+/execute P3 --yes    # sans confirmation interactive
 ```
 
-Raccourcis pour cycler :
+L’exécution reste dans Think : `bash`, `edit` et `write` sont déverrouillés pour ce run uniquement, puis reverrouillés à la fin ou après interruption. Un plan publié sous `/max` réactive automatiquement Pro/max pendant son exécution.
 
-- `Ctrl+Alt+M`
-- `F6`
+## `/max` — conseil Pro/max
 
-Dans l'éditeur principal, `Tab` reste volontairement réservé à l'autocomplétion Pi ; l'interview l'utilise localement pour ses onglets. Les combinaisons `Ctrl+Shift+lettre` sont également ambiguës dans de nombreux terminaux ; `F6` constitue le fallback fiable.
+`/max` n’est pas un mode : il s’exécute ponctuellement au-dessus du mode courant.
 
-## Interview interactif du mode plan
+```text
+/max analyser cette migration critique
+```
 
-Après sa reconnaissance en lecture seule, le mode plan appelle automatiquement `plan_interview` lorsqu'une décision utilisateur peut modifier matériellement la solution. Il n'ouvre pas d'interview cérémoniel si la demande et le code fournissent déjà toutes les réponses.
+- parent et workers : `deepseek-v4-pro`, thinking `max` ;
+- workers indépendants et read-only : investigator, solver, critic, adversarial, verifier ;
+- rounds parallèles, synthèse par preuves et contre-exemples, jamais par vote ;
+- nouveaux rounds seulement sur les désaccords ou risques critiques non résolus ;
+- Think + Max reste read-only ; Instant + Max conserve les mutations explicitement demandées ;
+- le modèle normal est restauré après le run, une erreur ou une interruption.
 
-L'interface regroupe jusqu'à quatre questions dans des onglets et propose :
+Une compaction qui doit encore résumer un run Max utilise Pro/max, même juste après sa fin. Une fois ce contexte Max compacté, les compactages suivants reviennent à Flash/high.
 
-- des options numérotées avec descriptions et recommandation éventuelle ;
-- une réponse libre via **Type something** ;
-- **Chat about this** pour revenir à la conversation avant de décider ;
-- navigation clavier avec les raccourcis de sélection Pi, `Tab`/flèches entre questions et chiffres pour choisir directement.
+## Undo et redo par prompt
 
-Les réponses reviennent comme résultat d'outil et restent donc dans l'historique de session. L'outil est autorisé uniquement en mode plan ; les garde-fous lecture seule restent inchangés. En RPC, il utilise les dialogues Pi standards. En mode print/JSON sans interface, l'agent reçoit l'instruction de poser les mêmes questions en texte.
+```text
+/undo
+/redo
+/undo --force         # accepter un drift sur les chemins concernés
+```
 
-## Workflow Ferrari
+Avant chaque prompt, le harness crée un snapshot Git dans un dépôt isolé sous le répertoire de données local. `/undo` :
 
-Ferrari fonctionne en deux phases distinctes :
+1. remonte la conversation avant le dernier message utilisateur ;
+2. replace le prompt dans l’éditeur via l’arbre de session Pi ;
+3. restaure seulement les chemins versionnables modifiés par ce prompt ;
+4. préserve les changements ultérieurs sans rapport ;
+5. supporte plusieurs undo, puis redo dans l’ordre inverse.
 
-### Phase planning (⏸)
-- Lecture seule : `bash`, `edit` et `write` sont **bloqués**.
-- L'agent explore le code avec `scout` et produit un plan en 3-7 étapes.
-- Il s'arrête automatiquement après le plan.
+Une nouvelle requête invalide redo. En cas de drift sur un chemin touché, une confirmation est demandée. Si le snapshot initial échoue, le tour reste read-only au lieu de muter sans filet.
 
-### Modal d'approbation
-Une fois le plan produit, une modal propose :
-- **▶ Exécuter le plan** — débloque `bash`, `edit`, `write` et lance BUILD + VERIFY.
-- **✏ Réviser** — ouvre l'éditeur pour donner un feedback ; l'agent produit un nouveau plan.
-- **✖ Annuler** — abandonne le plan sans modifier le workspace.
+### Portée du rollback
 
-L'approbation est **révoquée automatiquement** après l'exécution, au changement de mode, à `/tree` et au rechargement.
+Sont restaurés : fichiers non ignorés, créations, suppressions, renommages, liens et conversation active.
 
-En mode non interactif, le plan est capturé mais pas exécuté. Utiliser `/execute-ferrari --yes`.
+Ne sont pas garantis : fichiers ignorés modifiés par Bash, commits et refs Git, sous-dépôts, déploiements, bases, publications API et autres effets externes. Après un prompt Bash, `/undo` rappelle cette limite. Les objets de snapshot sont ancrés par refs ; aucun nettoyage automatique destructeur n’est effectué.
 
-## Handoff plan → build
+Les snapshots excluent toujours `.env`, `.env.*` et `.ssh`.
 
-Toute réponse structurée produite en mode plan est enregistrée comme dernier plan de la branche active. `/execute` :
+## Sous-agents
 
-1. affiche un aperçu et demande confirmation ;
-2. passe en mode build ;
-3. transmet le plan approuvé à Pro ;
-4. demande son exécution complète avec vérification.
+```text
+/scout <recherche>          # Flash/high, read-only
+/review [focus]             # Pro/max, diff Git
+/review-flash [focus]       # Flash/high
+/adversarial-flash [focus]  # Flash/high
+```
 
-Le plan est stocké dans une entrée de session Pi qui ne gonfle pas le contexte tant qu'il n'est pas exécuté.
-
-## Sous-agents DeepSeek
-
-Deux sous-agents lancent des processus Pi sans session et avec un contexte isolé :
-
-| Commande / rôle | Modèle | Accès | Contexte fourni |
-|---|---|---|---|
-| `/scout` / `scout` | Flash + max | read, grep, find, ls | dépôt + tâche bornée |
-| `/review` / `reviewer` | Pro + max | read, grep, find, ls | dépôt + status/diff Git collecté par le parent |
-
-Le modèle principal peut aussi les appeler via l'outil stable `deepseek_delegate`. Les enfants ne chargent ni les autres extensions, ni les skills ; seule la protection `.env`/SSH est explicitement conservée. Leur consommation est remontée dans les totaux lorsqu'ils sont appelés comme outil.
+L’outil `deepseek_delegate` expose les mêmes rôles aux agents principaux. Les usages imbriqués sont remontés dans les statistiques de session.
 
 ## OCR local
-
-Le package fournit le skill :
 
 ```text
 /skill:ocr ./capture.png
@@ -131,59 +102,40 @@ Le package fournit le skill :
 /skill:ocr ./document.png fra+eng
 ```
 
-Le skill appelle l'outil structuré `ocr_image`, disponible dans les quatre modes. Contrairement à l'ancien skill Reasonix :
+Tesseract fonctionne localement ; seules les données linguistiques du premier lancement sont téléchargées. L’image n’est pas envoyée à DeepSeek.
 
-- aucune commande `node -e` n'est construite avec un chemin injecté ;
-- `tesseract.js` est installé dans ce package, pas dans le workspace analysé ;
-- les données linguistiques sont mises en cache dans `~/.cache/pi-deepseek-harness/tesseract/` ;
-- le résultat est tronqué à la limite Pi et le texte complet est sauvegardé temporairement si nécessaire.
+## Contexte et métriques
 
-Le premier OCR d'une langue nécessite une connexion réseau pour télécharger ses données Tesseract. L'OCR reste local ensuite. Le réglage `images.blockImages` n'empêche pas cet outil de fonctionner : l'image n'est pas envoyée à DeepSeek, seul le texte extrait lui est retourné.
+- 55 % : réduction non destructive des anciens tool results ;
+- 65 % : réduction plus forte ;
+- 75 % : compaction structurée ;
+- Flash/high normalement, Pro/max tant qu’un run Max non encore compacté reste dans la branche ;
+- `/efficiency` affiche tokens, cache, coûts, outils, delegates et rounds Max.
 
-## Personnalisation
+Configuration :
 
-- Modèles, outils et raccourcis : [`config/harness.json`](config/harness.json)
-- Maintenance du contexte : [`config/context.json`](config/context.json)
-- Settings installés par défaut : [`config/settings.json`](config/settings.json)
-- Prompts des modes et sous-agents : [`instructions/`](instructions/)
+- modes et outils : `config/harness.json` ;
+- compaction : `config/context.json` ;
+- defaults : `config/settings.json` ;
+- instructions : `instructions/`.
 
-Après une modification, exécuter `/reload` dans Pi. Relancer `./install.sh` seulement si `config/settings.json` doit être réappliqué ou si le dossier a été déplacé.
-
-Validation manuelle :
+## Validation
 
 ```bash
+npm run lint
+npm test
 npm run check
 ```
 
-## Choix cache-first
+Les tests hors ligne couvrent configuration, garde sensible, cycle des plans, état Max, agrégation d’usage et snapshots temporaires avec création, suppression, Unicode, espaces, symlink et redo.
 
-- Le catalogue natif de Pi est utilisé : aucun `models.json` ne remplace les métadonnées DeepSeek.
-- Brainstorm, plan et build utilisent Pro avec thinking `high` ; ferrari utilise Flash avec thinking `high`.
-- Le schéma envoyé au modèle reste stable : l'union des outils, dont `ocr_image`, `deepseek_delegate` et `plan_interview`, est chargée une fois, puis l'extension bloque à l'exécution ceux que le mode n'autorise pas.
-- Les instructions de mode sont ajoutées en fin de contexte au lieu de reconstruire le prompt système.
-- À 55 %, les anciens résultats d'outils réussis sont raccourcis en gardant leur début et leur fin ; les 8 derniers tours restent intacts.
-- À 65 %, une réduction plus forte conserve les 5 derniers tours. Les erreurs ne sont jamais réduites.
-- À 75 %, une compaction structurée est générée avec Flash/high. L'historique intégral reste dans le JSONL.
-- Les notices de cache miss sont activées.
-- Brainstorm et plan bloquent effectivement `bash`, `edit` et `write`, même si leurs schémas restent visibles pour préserver le cache.
+## Protection sensible
 
-Les changements entre brainstorm, plan et build conservent le même modèle et restent favorables au cache. Passer vers ou depuis ferrari change de modèle et utilise donc un cache distinct. Il reste préférable de ne pas cycler inutilement.
+Le garde global bloque la lecture, recherche, édition et référence explicite de `.env`, `.env.*` et `~/.ssh`, puis filtre ces chemins des sorties Git. Cette barrière n’est pas une sandbox OS ; utiliser un conteneur pour du code non fiable.
 
-## Protection `.env` et SSH
+## Migration depuis la version quatre modes
 
-Le garde global refuse les chemins `.env`, `.env.*` et tout chemin sous `~/.ssh` pour `read`, `write`, `edit`, `grep`, `find`, `ls` et `ocr_image`. Il bloque aussi les commandes Bash qui référencent explicitement ces chemins et filtre les lignes sensibles qui remonteraient d'une recherche large.
-
-Cette protection est volontairement limitée : elle ne restreint ni le réseau, ni les autres fichiers, ni les écritures ordinaires. C'est une barrière de politique du harness, pas une isolation OS complète ; une commande shell volontairement obfusquée peut contourner une analyse textuelle. Pour du code non fiable ou une exécution autonome non supervisée, utiliser Docker ou un véritable sandbox OS.
-
-## Données volontairement externes au dépôt
-
-Les éléments suivants restent gérés par Pi :
-
-- secrets : `~/.pi/agent/auth.json` ou `DEEPSEEK_API_KEY` ;
-- sessions : `~/.pi/agent/sessions/` ;
-- inscription du chemin local : `~/.pi/agent/settings.json`.
-
-Le code et tous les réglages déclaratifs du harness restent dans ce dossier. Après un clone sur une nouvelle machine, il suffit de relancer `./install.sh`.
+Les anciens modes Brainstorm, Plan, Build et Ferrari, leurs commandes et `/execute-ferrari` ont été supprimés. Une session contenant un ancien mode revient sur Instant. Les anciens plans détectés par heuristique ne sont pas exécutables : Think doit les republier avec `publish_plan`.
 
 ## Désinstallation
 
@@ -191,4 +143,4 @@ Le code et tous les réglages déclaratifs du harness restent dans ce dossier. A
 ./uninstall.sh
 ```
 
-La désinstallation retire le package mais ne devine pas quels anciens defaults restaurer. Les sauvegardes de settings sont conservées dans `~/.pi/agent/backups/pi-deepseek-harness/`.
+Les defaults globaux et les sauvegardes restent volontairement intacts.

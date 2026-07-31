@@ -1,19 +1,19 @@
 import { readFileSync } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
-  truncateHead,
-  type ExtensionAPI,
-  type ExtensionContext,
-  withFileMutationQueue,
-} from "@earendil-works/pi-coding-agent";
-import { createWorker, OEM } from "tesseract.js";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { detectFerrariPlan, ferrariBuildInstructions, isMutationTool } from "./ferrari-workflow.ts";
+import { MAX_STATE_ENTRY, type MaxState, isMaxActive } from "./max-workflow.ts";
+import { redactSensitiveLines } from "./sensitive-paths.ts";
+import {
+  collectPlans,
+  formatPlan,
+  nextPlanId,
+  planEntryTypes,
+  selectPlan,
+  type PlanStatus,
+  type PublishedPlan,
+} from "./plan-workflow.ts";
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -25,261 +25,80 @@ interface ModeDefinition {
   tools: string[];
   instructionsFile: string;
 }
-
 interface HarnessConfig {
   defaultMode: string;
   cycle: string[];
   cycleShortcuts?: string[];
   modes: Record<string, ModeDefinition>;
 }
-
-interface LoadedMode extends ModeDefinition {
-  instructions: string;
-}
-
-interface LoadedConfig extends Omit<HarnessConfig, "modes"> {
-  modes: Record<string, LoadedMode>;
-}
+interface LoadedMode extends ModeDefinition { instructions: string }
+interface LoadedConfig extends Omit<HarnessConfig, "modes"> { modes: Record<string, LoadedMode> }
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultConfigPath = resolve(packageRoot, "config/harness.json");
-const configPath = process.env.PI_DEEPSEEK_HARNESS_CONFIG
-  ? resolve(process.env.PI_DEEPSEEK_HARNESS_CONFIG)
-  : defaultConfigPath;
+const configPath = process.env.PI_DEEPSEEK_HARNESS_CONFIG ? resolve(process.env.PI_DEEPSEEK_HARNESS_CONFIG) : defaultConfigPath;
+const maxInstructions = readFileSync(resolve(packageRoot, "instructions/max.md"), "utf8").trim();
+const MUTATION_TOOLS = new Set(["bash", "edit", "write"]);
 
 function loadConfig(): LoadedConfig {
   const raw = JSON.parse(readFileSync(configPath, "utf8")) as HarnessConfig;
   const configDir = dirname(configPath);
   const modes: Record<string, LoadedMode> = {};
-
-  if (!raw.modes || typeof raw.modes !== "object") {
-    throw new Error(`${configPath}: "modes" must be an object`);
-  }
-
-  for (const [name, mode] of Object.entries(raw.modes)) {
-    if (!mode.provider || !mode.model) {
-      throw new Error(`${configPath}: mode "${name}" needs provider and model`);
+  for (const [name, mode] of Object.entries(raw.modes ?? {})) {
+    if (!mode.provider || !mode.model || !Array.isArray(mode.tools) || mode.tools.length === 0) {
+      throw new Error(`${configPath}: invalid mode ${name}`);
     }
-    if (!Array.isArray(mode.tools) || mode.tools.length === 0) {
-      throw new Error(`${configPath}: mode "${name}" needs at least one tool`);
-    }
-
-    const instructionsPath = resolve(configDir, mode.instructionsFile);
-    modes[name] = {
-      ...mode,
-      instructions: readFileSync(instructionsPath, "utf8").trim(),
-    };
+    modes[name] = { ...mode, instructions: readFileSync(resolve(configDir, mode.instructionsFile), "utf8").trim() };
   }
-
-  if (!modes[raw.defaultMode]) {
-    throw new Error(`${configPath}: unknown default mode "${raw.defaultMode}"`);
-  }
-  if (!Array.isArray(raw.cycle) || raw.cycle.length === 0) {
-    throw new Error(`${configPath}: "cycle" must contain at least one mode`);
-  }
-  for (const name of raw.cycle) {
-    if (!modes[name]) throw new Error(`${configPath}: cycle references unknown mode "${name}"`);
-  }
-
+  if (!modes[raw.defaultMode]) throw new Error(`${configPath}: unknown default mode ${raw.defaultMode}`);
+  for (const name of raw.cycle ?? []) if (!modes[name]) throw new Error(`${configPath}: cycle references ${name}`);
   return { ...raw, modes };
 }
 
-export default function deepseekModesExtension(pi: ExtensionAPI): void {
+export default function deepseekModes(pi: ExtensionAPI): void {
   const config = loadConfig();
   const configuredToolSurface = [...new Set(Object.values(config.modes).flatMap((mode) => mode.tools))];
   let activeModeName = config.defaultMode;
   let modeNeedsAnnouncement = true;
-  let latestPlanText: string | undefined;
-  // Ferrari workflow
-  let ferrariPhase: "planning" | "executing" = "planning";
-  let ferrariPlanText: string | undefined;
-  let ferrariPlanPending = false;
-  let ferrariBuildPending = false;
-  let ferrariComplete = false;
+  let executionPlan: PublishedPlan | undefined;
+  let executionNeedsContext = false;
+  let executionInterrupted = false;
+  let maxActive = false;
+  let maxNeedsContext = false;
+  let maxRunId: string | undefined;
+  let maxReason: MaxState["reason"] = "command";
 
   function activeMode(): LoadedMode {
     return config.modes[activeModeName] ?? config.modes[config.defaultMode];
   }
 
-  pi.registerTool({
-    name: "ocr_image",
-    label: "OCR Image",
-    description: "Extract text from a local image with Tesseract OCR. Read-only for the project; defaults to French and English.",
-    parameters: Type.Object({
-      path: Type.String({ description: "Image path, absolute or relative to the current working directory" }),
-      languages: Type.Optional(
-        Type.String({ description: "Tesseract language codes joined with + (default: fra+eng)" }),
-      ),
-    }),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const rawPath = params.path.startsWith("@") ? params.path.slice(1) : params.path;
-      const imagePath = resolve(ctx.cwd, rawPath);
-      const imageStat = await stat(imagePath).catch(() => undefined);
-      if (!imageStat?.isFile()) throw new Error(`OCR image not found or not a file: ${imagePath}`);
-
-      const languages = params.languages?.trim() || "fra+eng";
-      if (!/^[a-z0-9_+-]+$/i.test(languages)) {
-        throw new Error(`Invalid Tesseract language expression: ${languages}`);
-      }
-
-      const cachePath = join(homedir(), ".cache", "pi-deepseek-harness", "tesseract");
-      await mkdir(cachePath, { recursive: true });
-      onUpdate?.({
-        content: [{ type: "text", text: `Loading OCR languages ${languages}...` }],
-        details: { imagePath, languages },
-      });
-
-      let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
-      const abortWorker = () => {
-        if (worker) void worker.terminate().catch(() => undefined);
-      };
-      signal?.addEventListener("abort", abortWorker, { once: true });
-
-      try {
-        if (signal?.aborted) throw new Error("OCR cancelled");
-        worker = await createWorker(languages, OEM.LSTM_ONLY, { cachePath });
-        if (signal?.aborted) throw new Error("OCR cancelled");
-
-        onUpdate?.({
-          content: [{ type: "text", text: `Recognizing text in ${basename(imagePath)}...` }],
-          details: { imagePath, languages },
-        });
-
-        const result = await worker.recognize(imagePath);
-        const text = result.data.text.trimEnd();
-        const confidence = Number(result.data.confidence) || 0;
-        const truncation = truncateHead(text || "(no text detected)", {
-          maxBytes: DEFAULT_MAX_BYTES,
-          maxLines: DEFAULT_MAX_LINES,
-        });
-
-        let fullOutputPath: string | undefined;
-        if (truncation.truncated) {
-          const outputDir = join(tmpdir(), "pi-deepseek-harness-ocr");
-          await mkdir(outputDir, { recursive: true });
-          fullOutputPath = join(outputDir, `${Date.now()}-${toolCallId.replace(/[^a-z0-9_-]/gi, "_")}.txt`);
-          await withFileMutationQueue(fullOutputPath, () => writeFile(fullOutputPath!, text, "utf8"));
-        }
-
-        const suffix = fullOutputPath
-          ? `\n\n[OCR output truncated. Full text saved to: ${fullOutputPath}]`
-          : "";
-        return {
-          content: [
-            {
-              type: "text",
-              text: `OCR text (${languages}, confidence ${confidence.toFixed(1)}%):\n\n${truncation.content}${suffix}`,
-            },
-          ],
-          details: {
-            imagePath,
-            languages,
-            confidence,
-            truncated: truncation.truncated,
-            fullOutputPath,
-          },
-        };
-      } finally {
-        signal?.removeEventListener("abort", abortWorker);
-        if (worker) await worker.terminate().catch(() => undefined);
-      }
-    },
-  });
-
-  function updateStatus(ctx: ExtensionContext): void {
-    const mode = activeMode();
-    let label = `mode:${mode.label ?? activeModeName}`;
-    if (activeModeName === "ferrari") {
-      label = ferrariPhase === "executing"
-        ? ctx.ui.theme.fg("warning", `mode:ferrari ⚡`)
-        : ctx.ui.theme.fg("accent", `mode:ferrari ⏸`);
-      ctx.ui.setStatus("deepseek-harness-mode", label);
-      return;
-    }
-    ctx.ui.setStatus(
-      "deepseek-harness-mode",
-      ctx.ui.theme.fg("accent", label),
-    );
-  }
-
-  function resetFerrariState(ctx?: ExtensionContext): void {
-    ferrariPhase = "planning";
-    ferrariPlanText = undefined;
-    ferrariPlanPending = false;
-    ferrariBuildPending = false;
-    ferrariComplete = false;
-    if (ctx) updateStatus(ctx);
-  }
-
-  function latestFerrariPlan(ctx: ExtensionContext): string | undefined {
-    const entries = ctx.sessionManager.getBranch();
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index] as {
-        type?: string;
-        customType?: string;
-        data?: { text?: string };
-      };
-      if (entry.type === "custom" && entry.customType === "ferrari-workflow-plan") {
-        return entry.data?.text;
-      }
-    }
-    return undefined;
+  function branchPlans(ctx: ExtensionContext): PublishedPlan[] {
+    return collectPlans(ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>);
   }
 
   function latestPersistedMode(ctx: ExtensionContext): string | undefined {
-    const entries = ctx.sessionManager.getBranch();
+    const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: { name?: string } }>;
     for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index] as {
-        type?: string;
-        customType?: string;
-        data?: { name?: string };
-      };
-      if (entry.type === "custom" && entry.customType === "deepseek-harness-mode") {
-        return entry.data?.name;
-      }
+      const entry = entries[index];
+      if (entry.type === "custom" && entry.customType === "deepseek-harness-mode") return entry.data?.name;
     }
     return undefined;
   }
 
-  function latestPersistedPlan(ctx: ExtensionContext): string | undefined {
-    const entries = ctx.sessionManager.getBranch();
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index] as {
-        type?: string;
-        customType?: string;
-        data?: { text?: string };
-      };
-      if (entry.type === "custom" && entry.customType === "deepseek-harness-plan") {
-        return entry.data?.text;
-      }
+  function updateStatus(ctx: ExtensionContext): void {
+    const suffix = maxActive ? " · MAX" : executionPlan ? ` · execute:${executionPlan.id}` : "";
+    ctx.ui.setStatus("deepseek-harness-mode", ctx.ui.theme.fg(maxActive ? "warning" : "accent", `mode:${activeModeName}${suffix}`));
+  }
+
+  async function setConfiguredModel(mode: LoadedMode, ctx: ExtensionContext): Promise<boolean> {
+    const model = ctx.modelRegistry.find(mode.provider, mode.model);
+    if (!model) {
+      ctx.ui.notify(`Model not found: ${mode.provider}/${mode.model}`, "error");
+      return false;
     }
-    return undefined;
-  }
-
-  function assistantText(message: unknown): string {
-    const candidate = message as {
-      role?: string;
-      content?: Array<{ type?: string; text?: string }>;
-    };
-    if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) return "";
-    return candidate.content
-      .filter((block) => block.type === "text" && typeof block.text === "string")
-      .map((block) => block.text)
-      .join("\n")
-      .trim();
-  }
-
-  function assistantHasToolCall(message: unknown): boolean {
-    const candidate = message as {
-      role?: string;
-      content?: Array<{ type?: string }>;
-    };
-    return candidate.role === "assistant" && candidate.content?.some((block) => block.type === "toolCall") === true;
-  }
-
-  function looksLikePlan(text: string): boolean {
-    const numberedSteps = text.match(/^\s*\d+[.)]\s+/gm)?.length ?? 0;
-    return /(?:^|\n)#{0,3}\s*(?:implementation\s+)?plan\b/i.test(text) || numberedSteps >= 2;
+    const ready = await pi.setModel(model);
+    if (!ready) ctx.ui.notify(`Authentication unavailable for ${mode.provider}/${mode.model}. Run /login deepseek.`, "error");
+    return ready;
   }
 
   async function activateMode(
@@ -289,407 +108,273 @@ export default function deepseekModesExtension(pi: ExtensionAPI): void {
   ): Promise<boolean> {
     const mode = config.modes[name];
     if (!mode) {
-      ctx.ui.notify(`Unknown mode "${name}". Available: ${Object.keys(config.modes).join(", ")}`, "error");
+      ctx.ui.notify(`Unknown mode ${name}. Available: ${Object.keys(config.modes).join(", ")}`, "error");
       return false;
     }
-
-    const availableTools = new Set(pi.getAllTools().map((tool) => tool.name));
-    const stableToolSurface = configuredToolSurface.filter((tool) => availableTools.has(tool));
-    const allowedTools = mode.tools.filter((tool) => availableTools.has(tool));
-    const missingTools = mode.tools.filter((tool) => !availableTools.has(tool));
-
-    if (missingTools.length > 0) {
-      ctx.ui.notify(`Mode "${name}": unavailable tools ignored: ${missingTools.join(", ")}`, "warning");
-    }
-    if (stableToolSurface.length === 0 || allowedTools.length === 0) {
-      ctx.ui.notify(`Mode "${name}" has no available tools and was not activated`, "error");
+    const available = new Set(pi.getAllTools().map((tool) => tool.name));
+    const stable = configuredToolSurface.filter((tool) => available.has(tool));
+    if (stable.length === 0) {
+      ctx.ui.notify("No configured harness tools are available", "error");
       return false;
     }
-
-    let modelReady = true;
-    const model = ctx.modelRegistry.find(mode.provider, mode.model);
-    if (!model) {
-      modelReady = false;
-      ctx.ui.notify(`Mode "${name}": model ${mode.provider}/${mode.model} not found`, "error");
-    } else {
-      modelReady = await pi.setModel(model);
-      if (!modelReady) {
-        ctx.ui.notify(
-          `Mode "${name}": authentication unavailable for ${mode.provider}/${mode.model}. Run /login deepseek.`,
-          "error",
-        );
-      }
-    }
-
+    const ready = await setConfiguredModel(mode, ctx);
     activeModeName = name;
     modeNeedsAnnouncement = true;
     pi.setThinkingLevel(mode.thinkingLevel);
-    // Keep one stable schema across modes for DeepSeek prefix-cache reuse.
-    // Runtime gates below enforce each mode's narrower allowlist.
-    pi.setActiveTools(stableToolSurface);
-
-    // Reset Ferrari state when leaving Ferrari mode
-    if (name !== "ferrari") {
-      resetFerrariState();
-    }
-
-    if (options.persist !== false) {
-      pi.appendEntry("deepseek-harness-mode", { name });
-    }
+    pi.setActiveTools(stable);
+    if (options.persist !== false) pi.appendEntry("deepseek-harness-mode", { name });
     updateStatus(ctx);
-
-    if (options.notify !== false) {
-      ctx.ui.notify(
-        `Mode ${name}: ${mode.provider}/${mode.model}, thinking ${mode.thinkingLevel}, allowed tools ${allowedTools.join(", ")}`,
-        modelReady ? "info" : "warning",
-      );
-    }
-
-    return modelReady;
+    if (options.notify !== false) ctx.ui.notify(`Mode ${name}: ${mode.model}, thinking ${mode.thinkingLevel}`, ready ? "info" : "warning");
+    return ready;
   }
 
-  async function activateFromCommand(name: string, task: string, ctx: ExtensionContext): Promise<void> {
-    if (!ctx.isIdle()) {
-      ctx.ui.notify("Wait for the current turn to finish before changing mode", "warning");
-      return;
+  async function activateMaxModel(ctx: ExtensionContext): Promise<boolean> {
+    const model = ctx.modelRegistry.find("deepseek", "deepseek-v4-pro");
+    if (!model || !(await pi.setModel(model))) {
+      ctx.ui.notify("DeepSeek V4 Pro authentication is required for /max", "error");
+      return false;
     }
-
-    const modelReady = await activateMode(name, ctx);
-    if (task.trim()) {
-      if (!modelReady) {
-        ctx.ui.setEditorText(task.trim());
-        ctx.ui.notify("Task restored to the editor; authenticate DeepSeek before submitting it", "warning");
-        return;
-      }
-      pi.sendUserMessage(task.trim());
-    }
+    pi.setThinkingLevel("max");
+    return true;
   }
 
-  async function cycleMode(ctx: ExtensionContext): Promise<void> {
-    if (!ctx.isIdle()) {
-      ctx.ui.notify("Wait for the current turn to finish before changing mode", "warning");
-      return;
-    }
-
-    const currentIndex = config.cycle.indexOf(activeModeName);
-    const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % config.cycle.length;
-    await activateMode(config.cycle[nextIndex], ctx);
+  function persistMax(active: boolean, reason: MaxState["reason"]): void {
+    pi.appendEntry(MAX_STATE_ENTRY, {
+      active,
+      runId: maxRunId ?? "unknown",
+      originMode: activeModeName,
+      reason,
+      timestamp: Date.now(),
+    } satisfies MaxState);
   }
 
-  pi.registerCommand("mode", {
-    description: "Select or inspect the DeepSeek harness mode",
-    getArgumentCompletions: (prefix) => {
-      const values = [...Object.keys(config.modes), "status"];
-      const matches = values
-        .filter((value) => value.startsWith(prefix))
-        .map((value) => ({ value, label: value }));
-      return matches.length > 0 ? matches : null;
-    },
-    handler: async (args, ctx) => {
-      const requested = args.trim();
-      if (requested === "status") {
-        const mode = activeMode();
-        ctx.ui.notify(
-          `Mode ${activeModeName}: ${mode.provider}/${mode.model}, thinking ${mode.thinkingLevel}, tools ${mode.tools.join(", ")}`,
-          "info",
-        );
-        return;
-      }
-      if (requested) {
-        await activateFromCommand(requested, "", ctx);
-        return;
-      }
+  async function beginMax(ctx: ExtensionContext, reason: MaxState["reason"]): Promise<boolean> {
+    if (!(await activateMaxModel(ctx))) return false;
+    maxActive = true;
+    maxNeedsContext = true;
+    maxReason = reason;
+    maxRunId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    persistMax(true, reason);
+    updateStatus(ctx);
+    return true;
+  }
 
-      const selected = await ctx.ui.select(
-        "DeepSeek mode",
-        Object.keys(config.modes).map((name) => {
-          const mode = config.modes[name];
-          const marker = name === activeModeName ? " (active)" : "";
-          return `${name}${marker} — ${mode.model}, ${mode.thinkingLevel}`;
-        }),
-      );
-      if (!selected) return;
-      await activateFromCommand(selected.split(/\s/)[0], "", ctx);
+  async function endTransientRun(ctx: ExtensionContext): Promise<void> {
+    if (executionPlan) {
+      const status: PlanStatus = executionInterrupted ? "interrupted" : "attempted";
+      pi.appendEntry(planEntryTypes.state, { id: executionPlan.id, status, timestamp: Date.now() });
+      executionPlan = undefined;
+      executionNeedsContext = false;
+      executionInterrupted = false;
+    }
+    if (maxActive) {
+      persistMax(false, maxReason);
+      maxActive = false;
+      maxNeedsContext = false;
+      maxRunId = undefined;
+      maxReason = "command";
+    }
+    const mode = activeMode();
+    await setConfiguredModel(mode, ctx);
+    pi.setThinkingLevel(mode.thinkingLevel);
+    updateStatus(ctx);
+  }
+
+  pi.registerTool({
+    name: "publish_plan",
+    label: "Publish Plan",
+    description: "Publish the final implementation-ready plan in Think mode. Call this tool alone as the final action of the turn.",
+    promptSnippet: "Publish a final structured implementation plan in Think mode",
+    promptGuidelines: ["Call publish_plan alone, never alongside another tool in the same batch.", "Use it only when an implementation plan is ready for /execute."],
+    parameters: Type.Object({
+      objective: Type.String({ minLength: 1 }),
+      steps: Type.Array(Type.Object({
+        description: Type.String({ minLength: 1 }),
+        files: Type.Array(Type.String()),
+        verification: Type.String({ minLength: 1 }),
+      }), { minItems: 1 }),
+      risks: Type.Array(Type.String()),
+      finalVerification: Type.Array(Type.String()),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (activeModeName !== "think" || executionPlan) throw new Error("publish_plan is available only in read-only Think mode");
+      const plans = branchPlans(ctx);
+      const plan: PublishedPlan = {
+        id: nextPlanId(plans),
+        objective: params.objective,
+        steps: params.steps,
+        risks: params.risks,
+        finalVerification: params.finalVerification,
+        effort: maxActive ? "max" : "normal",
+        status: "ready",
+        createdAt: Date.now(),
+      };
+      pi.appendEntry(planEntryTypes.plan, plan);
+      return { content: [{ type: "text", text: formatPlan(plan) }], details: plan, terminate: true };
     },
   });
 
-  for (const name of Object.keys(config.modes)) {
+  function statusText(ctx: ExtensionContext): string {
+    const plans = branchPlans(ctx);
+    const latest = plans.at(-1);
+    return `Mode ${activeModeName}: ${activeMode().model}/${activeMode().thinkingLevel}${maxActive ? " · MAX" : ""}${latest ? ` · latest plan ${latest.id}:${latest.status}` : ""}`;
+  }
+
+  pi.registerCommand("status", {
+    description: "Show harness mode, model, Max state, and latest plan",
+    handler: async (_args, ctx) => { ctx.ui.notify(statusText(ctx), "info"); },
+  });
+
+  pi.registerCommand("diff", {
+    description: "Show the current redacted Git status and diff",
+    handler: async (_args, ctx) => {
+      await ctx.waitForIdle();
+      const probe = await pi.exec("git", ["rev-parse", "--is-inside-work-tree"], { cwd: ctx.cwd, timeout: 5000 });
+      if (probe.code !== 0) { ctx.ui.notify("Current directory is not a Git worktree", "warning"); return; }
+      const status = await pi.exec("git", ["status", "--short"], { cwd: ctx.cwd, timeout: 30_000 });
+      const diff = await pi.exec("git", ["diff", "--no-ext-diff", "HEAD"], { cwd: ctx.cwd, timeout: 30_000 });
+      const body = redactSensitiveLines(`## Status\n${status.stdout || "(clean)"}\n\n## Diff\n${diff.stdout || "(empty)"}`);
+      pi.sendMessage({ customType: "deepseek-harness-diff", content: body.slice(0, 100_000), display: true });
+    },
+  });
+
+  pi.registerCommand("mode", {
+    description: "Select or inspect Think/Instant mode",
+    getArgumentCompletions: (prefix) => {
+      const matches = [...Object.keys(config.modes), "status"].filter((value) => value.startsWith(prefix));
+      return matches.length ? matches.map((value) => ({ value, label: value })) : null;
+    },
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) { ctx.ui.notify("Wait for the current run to finish", "warning"); return; }
+      const requested = args.trim();
+      if (requested === "status") {
+        ctx.ui.notify(statusText(ctx), "info");
+        return;
+      }
+      let selected = requested;
+      if (!selected) {
+        selected = (await ctx.ui.select("DeepSeek mode", Object.keys(config.modes).map((name) => `${name}${name === activeModeName ? " (active)" : ""}`)))?.split(/\s/)[0] ?? "";
+      }
+      if (selected) await activateMode(selected, ctx);
+    },
+  });
+
+  for (const name of ["think", "instant"] as const) {
     pi.registerCommand(name, {
       description: `Switch to ${name} mode; optional trailing text is submitted as the task`,
-      handler: async (args, ctx) => activateFromCommand(name, args, ctx),
+      handler: async (args, ctx) => {
+        if (!ctx.isIdle()) { ctx.ui.notify("Wait for the current run to finish", "warning"); return; }
+        const task = args.trim();
+        if (!(await activateMode(name, ctx))) {
+          if (task) ctx.ui.setEditorText(task);
+          return;
+        }
+        if (task) pi.sendUserMessage(task);
+      },
     });
   }
 
   pi.registerCommand("execute", {
-    description: "Confirm and execute the latest plan in build mode",
+    description: "Execute a published plan inside Think, then relock mutations",
     handler: async (args, ctx) => {
-      if (!ctx.isIdle()) {
-        ctx.ui.notify("Wait for the current turn to finish before executing a plan", "warning");
-        return;
-      }
-
-      latestPlanText = latestPlanText ?? latestPersistedPlan(ctx);
-      if (!latestPlanText) {
-        ctx.ui.notify("No implementation plan found in the active session branch. Create one with /plan first.", "warning");
-        return;
-      }
-
-      const skipConfirmation = /^(?:--yes|-y|yes)$/i.test(args.trim());
+      if (!ctx.isIdle()) { ctx.ui.notify("Wait for the current run to finish", "warning"); return; }
+      if (activeModeName !== "think") { ctx.ui.notify("/execute is available only in Think mode", "warning"); return; }
+      const tokens = args.trim().split(/\s+/).filter(Boolean);
+      const skipConfirmation = tokens.some((token) => /^(?:--yes|-y|yes)$/i.test(token));
+      const requestedId = tokens.find((token) => !/^(?:--yes|-y|yes)$/i.test(token));
+      const plan = selectPlan(branchPlans(ctx), requestedId);
+      if (!plan) { ctx.ui.notify(requestedId ? `Plan ${requestedId} not found` : "No ready published plan. Ask Think to produce one first.", "warning"); return; }
       if (!skipConfirmation) {
-        if (!ctx.hasUI) {
-          ctx.ui.notify("Use /execute --yes in non-interactive mode", "warning");
-          return;
-        }
-        const preview = latestPlanText.length > 1200 ? `${latestPlanText.slice(0, 1200)}\n…` : latestPlanText;
-        const confirmed = await ctx.ui.confirm("Execute latest plan?", `${preview}\n\nSwitch to build mode and continue?`);
-        if (!confirmed) return;
+        if (!ctx.hasUI) { ctx.ui.notify("Use /execute --yes in non-interactive mode", "warning"); return; }
+        if (!(await ctx.ui.confirm(`Execute plan ${plan.id}?`, formatPlan(plan).slice(0, 4000)))) return;
       }
-
-      const modelReady = await activateMode("build", ctx);
-      if (!modelReady) return;
-      const approvedPlan = latestPlanText.slice(0, 80_000);
-      pi.sendUserMessage(
-        `Execute the following user-approved plan completely. Validate assumptions against the current code, keep scope tight, and run relevant verification.\n\n<approved-plan>\n${approvedPlan}\n</approved-plan>`,
-      );
-    },
-  });
-
-  pi.registerCommand("execute-ferrari", {
-    description: "Confirm and execute the latest Ferrari plan in build mode",
-    handler: async (args, ctx) => {
-      if (!ctx.isIdle()) {
-        ctx.ui.notify("Wait for the current turn to finish before executing a plan", "warning");
-        return;
-      }
-
-      ferrariPlanText = ferrariPlanText ?? latestFerrariPlan(ctx);
-      if (!ferrariPlanText) {
-        ctx.ui.notify(
-          "No Ferrari plan found in the active session branch. Run Ferrari first.",
-          "warning",
-        );
-        return;
-      }
-
-      const skipConfirmation = /^(?:--yes|-y|yes)$/i.test(args.trim());
-      if (!skipConfirmation) {
-        if (!ctx.hasUI) {
-          ctx.ui.notify("Use /execute-ferrari --yes in non-interactive mode", "warning");
-          return;
-        }
-        const preview = ferrariPlanText.length > 1200
-          ? `${ferrariPlanText.slice(0, 1200)}\n…`
-          : ferrariPlanText;
-        const confirmed = await ctx.ui.confirm(
-          "Execute latest Ferrari plan?",
-          `${preview}\n\nSwitch to Ferrari build phase and continue?`,
-        );
-        if (!confirmed) return;
-      }
-
-      const modelReady = await activateMode("ferrari", ctx);
-      if (!modelReady) return;
-      const planSnapshot = ferrariPlanText.slice(0, 80_000);
-      ferrariPhase = "executing";
-      ferrariBuildPending = true;
-      ferrariPlanPending = false;
-      ferrariComplete = false;
+      if (plan.effort === "max" && !(await beginMax(ctx, "plan-execution"))) return;
+      executionPlan = plan;
+      executionNeedsContext = true;
+      executionInterrupted = false;
+      pi.appendEntry(planEntryTypes.state, { id: plan.id, status: "executing", timestamp: Date.now() });
       updateStatus(ctx);
-      pi.sendUserMessage(
-        `Exécute le plan Ferrari approuvé.\n\n<approved-plan>\n${planSnapshot}\n</approved-plan>`,
-      );
+      pi.sendUserMessage(`Execute approved plan ${plan.id}.`);
     },
   });
 
-  for (const shortcut of config.cycleShortcuts ?? []) {
-    pi.registerShortcut(shortcut, {
-      description: "Cycle DeepSeek harness mode",
-      handler: cycleMode,
-    });
+  pi.registerCommand("max", {
+    description: "Run a one-shot Pro/max multi-agent council above the current mode",
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) { ctx.ui.notify("Wait for the current run to finish", "warning"); return; }
+      let task = args.trim();
+      if (!task && ctx.hasUI) task = (await ctx.ui.input("Max task:", "What requires maximal scrutiny?"))?.trim() ?? "";
+      if (!task) { ctx.ui.notify("Usage: /max <task>", "warning"); return; }
+      if (!(await beginMax(ctx, "command"))) { ctx.ui.setEditorText(task); return; }
+      pi.sendUserMessage(task);
+    },
+  });
+
+  async function cycleMode(ctx: ExtensionContext): Promise<void> {
+    if (!ctx.isIdle() || maxActive || executionPlan) { ctx.ui.notify("Wait for the current run to finish", "warning"); return; }
+    const index = config.cycle.indexOf(activeModeName);
+    await activateMode(config.cycle[index < 0 ? 0 : (index + 1) % config.cycle.length], ctx);
   }
+  for (const shortcut of config.cycleShortcuts ?? []) pi.registerShortcut(shortcut, { description: "Cycle Think/Instant mode", handler: cycleMode });
 
   pi.on("tool_call", (event) => {
-    // Block mutation tools in Ferrari planning mode
-    if (activeModeName === "ferrari" && ferrariPhase === "planning" && isMutationTool(event.toolName)) {
-      return {
-        block: true,
-        reason: `Ferrari planning: "${event.toolName}" is disabled. Approve the plan first before making changes.`,
-      };
+    if (event.toolName === "deepseek_max_round" && !maxActive) return { block: true, reason: "deepseek_max_round is available only during /max" };
+    if (activeModeName === "think" && MUTATION_TOOLS.has(event.toolName)) {
+      if (executionPlan) return;
+      return { block: true, reason: "Think is read-only. Publish a plan and use /execute to approve mutations." };
     }
-
-    // Blocking mutation tools in read-only modes — suggest alternatives instead of "switch mode"
-    const READ_ONLY_MODES = new Set(["brainstorm", "plan"]);
-    if (READ_ONLY_MODES.has(activeModeName) && isMutationTool(event.toolName)) {
-      return {
-        block: true,
-        reason: `Mode ${activeModeName}: ${event.toolName} is disabled (this mode is read-only). Use ls, find, grep, or read for code inspection.`,
-      };
-    }
-
-    const mode = activeMode();
-    if (mode.tools.includes(event.toolName)) return;
-    const enablingModes = Object.entries(config.modes)
-      .filter(([, candidate]) => candidate.tools.includes(event.toolName))
-      .map(([name]) => name);
-    const hint = enablingModes.length > 0
-      ? `Switch to ${enablingModes.join(" or ")} mode before using it.`
-      : "No configured mode enables this tool.";
-    return {
-      block: true,
-      reason: `Mode ${activeModeName}: tool "${event.toolName}" is disabled. ${hint}`,
-    };
+    if (executionPlan && MUTATION_TOOLS.has(event.toolName)) return;
+    if (activeMode().tools.includes(event.toolName)) return;
+    return { block: true, reason: `Tool ${event.toolName} is disabled in ${activeModeName}` };
   });
 
   pi.on("before_agent_start", () => {
-    // Ferrari approved-build injection
-    if (ferrariBuildPending && activeModeName === "ferrari") {
-      ferrariBuildPending = false;
-      return {
-        message: {
-          customType: "ferrari-execute-context",
-          content: ferrariBuildInstructions(ferrariPlanText ?? ""),
-          display: false,
-        },
-      };
+    const sections: string[] = [];
+    if (modeNeedsAnnouncement) {
+      modeNeedsAnnouncement = false;
+      sections.push(`[DEEPSEEK HARNESS MODE: ${activeModeName.toUpperCase()}]\nThese instructions supersede earlier harness-mode instructions.\n\n${activeMode().instructions}`);
     }
-
-    // Defensive: clear ferrariBuildPending if we're not in ferrari mode
-    if (ferrariBuildPending && activeModeName !== "ferrari") {
-      ferrariBuildPending = false;
+    if (maxActive && maxNeedsContext) {
+      maxNeedsContext = false;
+      sections.push(`[MAX WORKFLOW ACTIVE — ${activeModeName.toUpperCase()} PERMISSIONS APPLY]\n\n${maxInstructions}`);
     }
-
-    if (!modeNeedsAnnouncement) return;
-    modeNeedsAnnouncement = false;
-    const mode = activeMode();
-    return {
-      message: {
-        customType: "deepseek-harness-mode-context",
-        content: `[DEEPSEEK HARNESS MODE: ${activeModeName.toUpperCase()}]\nThese instructions supersede earlier harness-mode instructions.\n\n${mode.instructions}`,
-        display: false,
-      },
-    };
+    if (executionPlan && executionNeedsContext) {
+      executionNeedsContext = false;
+      sections.push(`[USER-APPROVED EXECUTION — PLAN ${executionPlan.id}]\nMutation tools are temporarily approved for this run only. Execute, verify, and report.\n\n${formatPlan(executionPlan)}`);
+    }
+    if (sections.length === 0) return;
+    return { message: { customType: "deepseek-harness-context", content: sections.join("\n\n"), display: false } };
   });
 
   pi.on("turn_end", (event) => {
-    if (activeModeName === "plan" && !assistantHasToolCall(event.message)) {
-      const text = assistantText(event.message);
-      if (text && looksLikePlan(text)) {
-        latestPlanText = text.slice(0, 80_000);
-        pi.appendEntry("deepseek-harness-plan", { text: latestPlanText, capturedAt: Date.now() });
-      }
-    }
-
-    // Ferrari plan detection: capture plans even alongside tool calls —
-    // detectFerrariPlan is strict enough (PHASE 2 marker + 3-7 steps + no PHASE 3 + stop marker)
-    if (activeModeName === "ferrari" && ferrariPhase === "planning" && !ferrariPlanPending) {
-      const text = assistantText(event.message);
-      if (!text) return;
-      const plan = detectFerrariPlan(text);
-      if (plan) {
-        ferrariPlanText = plan.rawText.slice(0, 80_000);
-        ferrariPlanPending = true;
-        pi.appendEntry("ferrari-workflow-plan", { text: ferrariPlanText, capturedAt: Date.now() });
-      }
-    }
-
-    // Ferrari execution: detect completion marker (accent-insensitive)
-    if (activeModeName === "ferrari" && ferrariPhase === "executing" && !ferrariComplete) {
-      const text = assistantText(event.message);
-      if (text) {
-        const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        if (/FERRARI\s*COMPLETE/i.test(normalized)) {
-          ferrariComplete = true;
-        }
-      }
-    }
+    if (!executionPlan || event.message.role !== "assistant") return;
+    if (event.message.stopReason === "error" || event.message.stopReason === "aborted") executionInterrupted = true;
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    // Revoke Ferrari execution approval after build completes (detected via FERRARI COMPLETE marker)
-    if (activeModeName === "ferrari" && ferrariPhase === "executing" && ferrariComplete) {
-      resetFerrariState(ctx);
-      return;
-    }
-
-    // Show Ferrari plan approval modal
-    if (activeModeName !== "ferrari" || !ferrariPlanPending || !ferrariPlanText) return;
-
-    // Snapshot before async to avoid TOCTOU from session_compact / session_tree
-    const planSnapshot = ferrariPlanText;
-
-    if (!ctx.hasUI) {
-      // Non-interactive: keep plan captured, reset pending so next plan can be detected
-      ferrariPlanPending = false;
-      ctx.ui.notify(
-        "Ferrari plan captured but no UI available. Use /execute-ferrari --yes to run it.",
-        "warning",
-      );
-      return;
-    }
-
-    const preview = planSnapshot.length > 1200
-      ? `${planSnapshot.slice(0, 1200)}\n…`
-      : planSnapshot;
-
-    const choice = await ctx.ui.select("Ferrari — valider le plan", [
-      "▶ Exécuter le plan",
-      "✏ Réviser (donner un feedback)",
-      "✖ Annuler",
-    ]);
-
-    // Re-check after await: state could have been reset by compaction/tree/switch
-    if (!ferrariPlanPending || ferrariPlanText !== planSnapshot) {
-      return;
-    }
-
-    if (!choice || choice.startsWith("✖")) {
-      ferrariPlanPending = false;
-      ferrariPlanText = undefined;
-      updateStatus(ctx);
-      return;
-    }
-
-    if (choice.startsWith("✏")) {
-      ferrariPlanPending = false;
-      ferrariPlanText = undefined;
-      const feedback = await ctx.ui.editor("Feedback pour réviser le plan :", "");
-      updateStatus(ctx);
-      if (feedback?.trim()) {
-        pi.sendUserMessage(
-          `Révise le plan précédent avec ce feedback :\n\n${feedback.trim()}`,
-        );
-      }
-      return;
-    }
-
-    // Execute: approve and trigger build
-    ferrariPlanPending = false;
-    ferrariPhase = "executing";
-    ferrariBuildPending = true;
-    ferrariComplete = false;
-    updateStatus(ctx);
-
-    pi.sendUserMessage(
-      `Exécute le plan Ferrari approuvé.\n\n<approved-plan>\n${planSnapshot.slice(0, 80_000)}\n</approved-plan>`,
-    );
+    if (executionPlan || maxActive) await endTransientRun(ctx);
   });
 
-  pi.on("session_compact", () => {
-    modeNeedsAnnouncement = true;
-    resetFerrariState();
-  });
-
-  pi.on("session_tree", () => {
-    modeNeedsAnnouncement = true;
-    resetFerrariState();
-  });
-
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_compact", () => { modeNeedsAnnouncement = true; });
+  pi.on("session_tree", async (_event, ctx) => {
+    executionPlan = undefined;
+    executionNeedsContext = false;
+    maxActive = false;
+    maxNeedsContext = false;
     const restored = latestPersistedMode(ctx);
-    const initialMode = restored && config.modes[restored] ? restored : config.defaultMode;
-    latestPlanText = latestPersistedPlan(ctx);
-    // Restore Ferrari plan from session (but always start in planning phase)
-    ferrariPlanText = latestFerrariPlan(ctx);
-    await activateMode(initialMode, ctx, { persist: false, notify: false });
+    const target = restored && config.modes[restored] ? restored : config.defaultMode;
+    if (target !== activeModeName) await activateMode(target, ctx, { persist: false, notify: false });
+    else { modeNeedsAnnouncement = true; updateStatus(ctx); }
+  });
+  pi.on("session_start", async (_event, ctx) => {
+    executionPlan = undefined;
+    maxActive = false;
+    maxNeedsContext = false;
+    if (isMaxActive(ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>)) {
+      maxRunId = "interrupted";
+      persistMax(false, "command");
+    }
+    const restored = latestPersistedMode(ctx);
+    await activateMode(restored && config.modes[restored] ? restored : config.defaultMode, ctx, { persist: false, notify: false });
   });
 }

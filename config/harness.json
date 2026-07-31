@@ -1,70 +1,17 @@
 {
-  "defaultMode": "build",
+  "defaultMode": "instant",
   "cycle": [
-    "brainstorm",
-    "plan",
-    "build",
-    "ferrari"
+    "instant",
+    "think"
   ],
   "cycleShortcuts": [
     "ctrl+alt+m",
-    "f6"
+    "f6",
+    "f7"
   ],
   "modes": {
-    "brainstorm": {
-      "label": "brainstorm",
-      "provider": "deepseek",
-      "model": "deepseek-v4-pro",
-      "thinkingLevel": "high",
-      "tools": [
-        "read",
-        "grep",
-        "find",
-        "ls",
-        "ocr_image",
-        "deepseek_delegate",
-        "web_search"
-      ],
-      "instructionsFile": "../instructions/brainstorm.md"
-    },
-    "plan": {
-      "label": "plan",
-      "provider": "deepseek",
-      "model": "deepseek-v4-pro",
-      "thinkingLevel": "high",
-      "tools": [
-        "read",
-        "grep",
-        "find",
-        "ls",
-        "ocr_image",
-        "deepseek_delegate",
-        "plan_interview",
-        "web_search"
-      ],
-      "instructionsFile": "../instructions/plan.md"
-    },
-    "build": {
-      "label": "build",
-      "provider": "deepseek",
-      "model": "deepseek-v4-pro",
-      "thinkingLevel": "high",
-      "tools": [
-        "read",
-        "grep",
-        "find",
-        "ls",
-        "bash",
-        "edit",
-        "write",
-        "ocr_image",
-        "deepseek_delegate",
-        "web_search"
-      ],
-      "instructionsFile": "../instructions/build.md"
-    },
-    "ferrari": {
-      "label": "ferrari",
+    "instant": {
+      "label": "instant",
       "provider": "deepseek",
       "model": "deepseek-v4-flash",
       "thinkingLevel": "high",
@@ -78,9 +25,29 @@
         "write",
         "ocr_image",
         "deepseek_delegate",
+        "deepseek_max_round",
         "web_search"
       ],
-      "instructionsFile": "../instructions/ferrari.md"
+      "instructionsFile": "../instructions/instant.md"
+    },
+    "think": {
+      "label": "think",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "thinkingLevel": "high",
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "ocr_image",
+        "deepseek_delegate",
+        "deepseek_max_round",
+        "plan_interview",
+        "publish_plan",
+        "web_search"
+      ],
+      "instructionsFile": "../instructions/think.md"
     }
   }
 }

@@ -11,5 +11,9 @@
   "compactionProvider": "deepseek",
   "compactionModel": "deepseek-v4-flash",
   "compactionThinkingLevel": "high",
-  "compactionMaxTokens": 12000
+  "compactionMaxTokens": 12000,
+  "maxCompactionProvider": "deepseek",
+  "maxCompactionModel": "deepseek-v4-pro",
+  "maxCompactionThinkingLevel": "max",
+  "maxCompactionMaxTokens": 30000
 }

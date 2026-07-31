@@ -30,6 +30,7 @@ done
 command -v pi >/dev/null 2>&1 || { echo "Error: pi is not available in PATH." >&2; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "Error: node is not available in PATH." >&2; exit 1; }
 command -v npm >/dev/null 2>&1 || { echo "Error: npm is not available in PATH." >&2; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "Error: git is required for prompt-scoped undo/redo." >&2; exit 1; }
 
 node "$ROOT_DIR/scripts/check-config.mjs"
 echo "Installing the pinned OCR runtime locally..."
@@ -75,14 +76,18 @@ cat <<EOF
 Installation complete.
 
 Modes:
-  /brainstorm [task]
-  /plan [task]
-  /build [task]
-  /ferrari [task]
-  /execute
+  /think [task]
+  /instant [task]
+  /mode                 # select Think or Instant
+  /mode status
+  /status
+  /diff
+  /execute [plan-id]    # execute a published Think plan, without leaving Think
+  /max [task]           # one-shot Pro/max council above the current mode
+  /undo [--force]
+  /redo [--force]
   /scout [task]
   /review [focus]
-  /mode
 
 Cycle shortcut: Ctrl+Alt+M or F6
 Configuration:  $ROOT_DIR/config/harness.json

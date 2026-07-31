@@ -1,6 +1,6 @@
 {
   "name": "pi-deepseek-harness-local",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "A cache-conscious DeepSeek-native mode harness for Pi",
@@ -10,7 +10,9 @@
     "coding-agent"
   ],
   "scripts": {
-    "check": "node ./scripts/check-config.mjs && node --experimental-strip-types ./scripts/check-sensitive.mjs && node --experimental-strip-types ./scripts/check-ferrari-workflow.mjs"
+    "lint": "node ./scripts/check-config.mjs && node ./scripts/check-extension-load.mjs",
+    "test": "node --experimental-strip-types ./scripts/check-sensitive.mjs && node --experimental-strip-types ./scripts/check-plan-workflow.mjs && node --experimental-strip-types ./scripts/check-max-workflow.mjs && node --experimental-strip-types ./scripts/check-checkpoints.mjs",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
     "tesseract.js": "7.0.0"
@@ -25,6 +27,8 @@
   "pi": {
     "extensions": [
       "./extensions/sensitive-paths.ts",
+      "./extensions/deepseek-checkpoints.ts",
+      "./extensions/deepseek-ocr.ts",
       "./extensions/deepseek-subagents.ts",
       "./extensions/deepseek-modes.ts",
       "./extensions/plan-interview.ts",

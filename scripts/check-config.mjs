@@ -43,9 +43,15 @@ if (!config.modes?.[config.defaultMode]) fail(`defaultMode '${config.defaultMode
 const interviewModes = Object.entries(config.modes ?? {})
   .filter(([, mode]) => Array.isArray(mode.tools) && mode.tools.includes("plan_interview"))
   .map(([name]) => name);
-if (interviewModes.length !== 1 || interviewModes[0] !== "plan") {
-  fail("plan_interview must be enabled only in plan mode");
+if (Object.keys(config.modes ?? {}).sort().join(",") !== "instant,think") {
+  fail("the harness must define exactly instant and think modes");
 }
+if (config.defaultMode !== "instant") fail("defaultMode must be instant");
+if (interviewModes.length !== 1 || interviewModes[0] !== "think") {
+  fail("plan_interview must be enabled only in think mode");
+}
+if (!config.modes?.think?.tools?.includes("publish_plan")) fail("publish_plan must be enabled in think");
+if (!config.modes?.instant?.tools?.includes("bash")) fail("instant must enable mutation tools");
 if (!Array.isArray(config.cycle) || config.cycle.length === 0) {
   fail("cycle must be a non-empty array");
 } else {
@@ -66,6 +72,11 @@ try {
   if (!allowedThinkingLevels.has(context.compactionThinkingLevel)) {
     fail("invalid compactionThinkingLevel");
   }
+  if (!context.maxCompactionProvider || !context.maxCompactionModel) fail("max compaction provider/model are required");
+  if (context.maxCompactionThinkingLevel !== "max") fail("maxCompactionThinkingLevel must be max");
+  if (!Number.isFinite(context.maxCompactionMaxTokens) || context.maxCompactionMaxTokens < context.compactionMaxTokens) {
+    fail("maxCompactionMaxTokens must be at least compactionMaxTokens");
+  }
 } catch (error) {
   fail(`cannot parse context config: ${error.message}`);
 }
@@ -76,14 +87,29 @@ for (const relativePath of [
   "skills/ocr/SKILL.md",
   "extensions/sensitive-paths.ts",
   "extensions/plan-interview.ts",
+  "extensions/deepseek-checkpoints.ts",
+  "extensions/checkpoint-store.ts",
+  "extensions/deepseek-ocr.ts",
+  "extensions/max-workflow.ts",
+  "extensions/plan-workflow.ts",
+  "instructions/think.md",
+  "instructions/instant.md",
+  "instructions/max.md",
+  "instructions/agents/max-worker.md",
 ]) {
   if (!existsSync(resolve(root, relativePath))) fail(`missing ${relativePath}`);
 }
 
 try {
   const packageConfig = JSON.parse(readFileSync(packagePath, "utf8"));
-  if (!packageConfig.pi?.extensions?.includes("./extensions/plan-interview.ts")) {
-    fail("package.json must register extensions/plan-interview.ts");
+  for (const extension of [
+    "./extensions/deepseek-checkpoints.ts",
+    "./extensions/deepseek-ocr.ts",
+    "./extensions/deepseek-subagents.ts",
+    "./extensions/deepseek-modes.ts",
+    "./extensions/plan-interview.ts",
+  ]) {
+    if (!packageConfig.pi?.extensions?.includes(extension)) fail(`package.json must register ${extension}`);
   }
   if (!packageConfig.peerDependencies?.["@earendil-works/pi-tui"]) {
     fail("package.json must declare @earendil-works/pi-tui as a peer dependency");

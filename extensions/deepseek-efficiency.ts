@@ -162,7 +162,7 @@ export default function deepseekEfficiency(pi: ExtensionAPI): void {
 
     for (const tr of event.toolResults) {
       stats.toolCounts[tr.toolName] = (stats.toolCounts[tr.toolName] ?? 0) + 1;
-      if (tr.toolName === "web_search" || tr.toolName === "deepseek_delegate") {
+      if (["web_search", "deepseek_delegate", "deepseek_max_round"].includes(tr.toolName)) {
         addSpecialTool(stats, tr.toolName, tr.usage);
       }
     }
